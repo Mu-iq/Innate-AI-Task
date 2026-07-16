@@ -1,0 +1,39 @@
+# Secrets. Note .env.example is COMMITTED and must stay blank — a key pasted
+# into the template ships to GitHub.
+.env
+.env.local
+frontend/.env.local
+!.env.example
+!frontend/.env.local.example
+
+# Backend raw artifacts: traces, per-run scratch, and the paid-API cache.
+# These are development state, not deliverables.
+backend/outputs/
+backend/.cache/
+
+# The auto-cropped product plates are derived artifacts, regenerated on demand.
+backend/data/products/plates/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+supabase/
+
+# Run results and generated images are stored in the database and the storage
+# bucket, not in the repo. There is no committed results.json or public outputs
+# folder any more.

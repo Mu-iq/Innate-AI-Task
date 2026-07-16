@@ -1,0 +1,29 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+
+  "//": "Monorepo: the app lives in frontend/, but this config sits at the repo root so Vercel needs no Root Directory set in the dashboard. Just import the repo and deploy.",
+
+  "framework": null,
+  "installCommand": "npm install --prefix frontend",
+  "buildCommand": "npm run build --prefix frontend",
+  "outputDirectory": "frontend/dist",
+
+  "rewrites": [
+    {
+      "//": "Single-page app: every path serves index.html so a deep link or a refresh doesn't 404 on Vercel's static host.",
+      "source": "/((?!assets/).*)",
+      "destination": "/index.html"
+    }
+  ],
+
+  "headers": [
+    {
+      "//": "Vite fingerprints these filenames, so they can be cached hard and for ever. index.html deliberately isn't, so a redeploy is picked up immediately.",
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    }
+  ]
+}
+

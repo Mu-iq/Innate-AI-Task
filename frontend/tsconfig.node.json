@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    // A referenced project must be `composite`, and a composite project may not
+    // set noEmit (TS6310). We only ever want the typecheck, so the emit is
+    // pointed at a throwaway directory inside node_modules rather than dropped
+    // next to vite.config.ts.
+    "composite": true,
+    "outDir": "./node_modules/.tmp/tsconfig.node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}

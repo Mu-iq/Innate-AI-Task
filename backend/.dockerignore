@@ -1,0 +1,25 @@
+# Keep the build context small and never bake secrets or local state into the
+# image. Cloud Run uploads this directory, so anything here is a slower deploy.
+
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local scratch: run traces, in-flight images, and the paid-API cache. The cache
+# is deliberately excluded — it is keyed to local runs and would bloat the image
+# for no benefit, since Cloud Run's filesystem is ephemeral anyway.
+outputs/
+.cache/
+
+# Derived: the plates are re-cropped from data/products on first run.
+data/products/plates/
+
+tests/
+Dockerfile
+.dockerignore

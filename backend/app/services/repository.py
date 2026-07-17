@@ -45,6 +45,56 @@ def available() -> bool:
     return supabase_client.is_available()
 
 
+def reconcile_funnel(
+    f: Funnel,
+    accepted: int,
+    rejected: list[Rejection],
+) -> Funnel:
+    """Recompute the paid stages from the per-venue records.
+
+    The stage counters are a *summary*; `run_results` is the *ground truth*. Every
+    venue that entered the paid stages is either an accepted row or a rejection
+    row carrying the stage it died at, so the summary is derivable — and deriving
+    it means the funnel can never disagree with the rejection table printed
+    beside it in design.md. Both are computed from the same rows.
+
+    This also repairs runs recorded before the counters were fixed, which matters
+    because a run costs real money: the alternative to deriving is re-running the
+    pipeline to correct a number we can already prove from what we stored.
+
+    Discovery's three counters are NOT derivable and are passed through: we keep
+    only the handful of candidates that reached the paid stages, not the ~285 we
+    filtered on name and status.
+    """
+    drops: dict[str, int] = {}
+    for r in rejected:
+        if r.stage != "discover":  # discovery drops are pre-pipeline
+            drops[r.stage] = drops.get(r.stage, 0) + 1
+
+    # Every venue that entered is accounted for exactly once: accepted, or
+    # dropped at one stage. A venue never reached is in neither, which is why
+    # this is derived rather than read from the shortlist cap.
+    entered = accepted + sum(drops.values())
+
+    capture_ok = entered - drops.get("capture", 0)
+    assess_ok = capture_ok - drops.get("assess", 0)
+    measure_ok = assess_ok - drops.get("measure", 0)
+    # A "verify" rejection still generated an image, so it counts here and drops
+    # out at the next line. Only a "composite" rejection means none came back.
+    composite_ok = measure_ok - drops.get("composite", 0)
+
+    return f.model_copy(
+        update={
+            "entered_pipeline": entered,
+            "capture_ok": capture_ok,
+            "assess_ok": assess_ok,
+            "measure_ok": measure_ok,
+            "composite_ok": composite_ok,
+            "accepted": accepted,
+        }
+    )
+
+
 def funnel_columns(f: Funnel) -> dict[str, int]:
     """A Funnel as `runs` column names.
 
@@ -446,6 +496,19 @@ def get_run(run_key: str | None = None) -> ResultsPayload | None:
             allow_duplicates=bool(run.get("allow_duplicates", True)),
         )
 
+    # Discovery's counters come from the run row; the paid stages are derived
+    # from the records above, so the funnel and the rejection table can never
+    # disagree. See reconcile_funnel.
+    funnel = reconcile_funnel(
+        Funnel(
+            discovered=run.get("funnel_discovered") or 0,
+            after_chain_filter=run.get("funnel_after_chain_filter") or 0,
+            after_status_filter=run.get("funnel_after_status_filter") or 0,
+        ),
+        accepted=len(venues),
+        rejected=rejected,
+    )
+
     return ResultsPayload(
         run_id=run["run_key"],
         generated_at=run.get("finished_at") or run.get("started_at") or _now(),
@@ -455,17 +518,7 @@ def get_run(run_key: str | None = None) -> ResultsPayload | None:
         thresholds=thresholds,
         settings=settings,
         cost=cost,
-        funnel={
-            "discovered": run.get("funnel_discovered") or 0,
-            "after_chain_filter": run.get("funnel_after_chain_filter") or 0,
-            "after_status_filter": run.get("funnel_after_status_filter") or 0,
-            "entered_pipeline": run.get("funnel_entered_pipeline") or 0,
-            "capture_ok": run.get("funnel_capture_ok") or 0,
-            "assess_ok": run.get("funnel_assess_ok") or 0,
-            "measure_ok": run.get("funnel_measure_ok") or 0,
-            "composite_ok": run.get("funnel_composite_ok") or 0,
-            "accepted": run.get("funnel_accepted") or 0,
-        },
+        funnel=funnel,
         venues=venues,
         rejected=rejected,
         source="database",

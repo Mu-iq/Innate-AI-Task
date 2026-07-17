@@ -4,7 +4,7 @@ A prospecting engine that finds independent London venues with bare frontages, p
 
 The engineering claim of this submission is not that the images are beautiful. It is that **nothing on the output page was chosen by a human**, and that every accept and reject is a named constant in [`backend/app/config.py`](backend/app/config.py) rather than a judgement someone made by eye. At 5,000 venues a week, that distinction is the whole product.
 
-> **Status of the numbers in this document.** The run-dependent tables (§2.4, §3) are generated straight from the database by `python -m scripts.design_tables`, not typed by hand, so they cannot drift from what the pipeline actually did. They quote run `20260716-230923-0e7fad`; every run is kept and browsable in the live demo.
+> **Status of the numbers in this document.** The run-dependent tables (§2.4, §3) are generated straight from the database by `python -m scripts.design_tables`, not typed by hand, so they cannot drift from what the pipeline actually did. They all quote the same run, `20260716-235319-f88e2c`; every run is kept and browsable in the live demo. The script refuses to print a funnel it cannot reconcile against that run's rejection table, line by line — the two tables in §2.4 are computed from the same rows.
 
 ---
 
@@ -12,38 +12,51 @@ The engineering claim of this submission is not that the images are beautiful. I
 
 Six stages. Each is a separate module exposing a pure, typed function. No stage imports another; [`services/pipeline.py`](backend/app/services/pipeline.py) is the only thing that knows the order exists. Every stage returns **either** its result **or** a structured `Rejection` carrying reasons — never `None`, never a bare `False`.
 
+```mermaid
+flowchart TD
+    A["<b>1 · DISCOVER</b><br/>Google Places (New)<br/>5 areas × 3 categories → ~285"]
+    B{"Chain? · Inside a mall?<br/>Closed? · Under 5 reviews?"}
+    C["Survivors, ordered by reviews<br/>top N enter the paid stages"]
+
+    A --> B
+    B -->|"filtered"| REJ
+    B -->|"survives"| C
+
+    C --> D["<b>2 · CAPTURE</b><br/>Street View metadata — free<br/>gives the panorama's real position"]
+    D --> E["bearing = pano → venue<br/>fov 75° · pitch 8°<br/>requested by pano id"]
+    E --> F{"<b>3 · ASSESS</b><br/>Entrance visible?<br/>Framing usable?<br/>Bareness ≥ 6?"}
+
+    F -->|"framing bad"| G["re-shoot same pano<br/>heading +25°"]
+    G --> F
+    F -->|"still bad framing"| H["the venue's own<br/>Google Business photo"]
+    H --> F
+    F -->|"not bare enough"| REJ
+
+    F -->|"usable"| I["<b>4 · MEASURE</b><br/>door height → px_per_metre<br/>→ expected planter size"]
+    I --> J["<b>5 · COMPOSITE</b><br/>Nano Banana 2<br/>frontage + 3 real product refs"]
+    J --> K{"<b>6 · VERIFY</b><br/>Building unaltered?<br/>Product faithful?<br/>Scale within ±40%?<br/>Grounded? Door clear?"}
+
+    K -->|"reject → reasons appended<br/>(max 2 attempts)"| J
+    K -->|"still failing"| REJ
+    K -->|"accept"| DB
+
+    REJ["<b>Rejection</b><br/>persisted with its reasons<br/>— the deliverable"]
+    DB[("<b>Supabase</b><br/>runs · venues · run_results<br/>+ storage bucket<br/>read back as run history")]
+
+    REJ --> DB
+
+    classDef stage fill:#1b3a2a,stroke:#2f7d52,color:#e8f5ed
+    classDef gate fill:#3a3320,stroke:#8a7a3a,color:#f5efdc
+    classDef bad fill:#3a2220,stroke:#8a4a42,color:#f7e3e0
+    classDef store fill:#1e2a3a,stroke:#3f5f8a,color:#e0ecf7
+    class A,C,D,E,G,H,I,J stage
+    class B,F,K gate
+    class REJ bad
+    class DB store
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │  config.py — every threshold, one file       │
-                    └─────────────────────────────────────────────┘
-                                       │ (read by all)
-                                       ▼
-  ┌──────────┐   VenueCandidate   ┌──────────┐   Capture    ┌──────────┐
-  │    [1]   │───────────────────▶│    [2]   │─────────────▶│    [3]   │
-  │ discover │                    │ capture  │              │  assess  │
-  │  Places  │                    │ SV meta  │◀── nudge ────│  vision  │
-  │  (New)   │                    │ →bearing │   ±25° once  │  0–10    │
-  └──────────┘                    │ →static  │              └──────────┘
-       │                          │ ↓fallback│                   │
-       │ Rejection                │  Places  │                   │ Assessment
-       │                          │  Photos  │                   │ (+product choice)
-       ▼                          └──────────┘                   ▼
-  ┌────────────────────────────────────────────────┐        ┌──────────┐
-  │      Supabase: runs · venues · run_results      │        │    [4]   │
-  │      + storage bucket (before/after/prompt)     │        │ measure  │
-  │      ↳ read back as run history in the UI       │        │ door→px  │
-  └────────────────────────────────────────────────┘        └──────────┘
-       ▲                                                          │
-       │ VenueResult                                              │ Measurement
-       │                                                          │ px_per_metre
-  ┌──────────┐                    ┌──────────┐                    │
-  │    [6]   │◀───── Composite ───│    [5]   │◀───────────────────┘
-  │  verify  │                    │composite │
-  │ before/  │───── reject ──────▶│ Nano     │  + 3 real product refs
-  │  after   │   reasons appended │ Banana 2 │
-  │  diff    │   (max 2 attempts) │          │
-  └──────────┘                    └──────────┘
-```
+
+Every threshold in the diamonds — `6`, `±40%`, `+25°`, `2 attempts` — is a named constant in
+[`config.py`](backend/app/config.py). None is buried in a function.
 
 ### What flows between the stages
 
@@ -87,12 +100,24 @@ Four filters, each recording a `Rejection` with its reason:
 
 | Filter | Rule | Why |
 |---|---|---|
-| Chain blocklist | Name substring against `CHAIN_BLOCKLIST` | Outreach needs an owner who can say yes to a planter. A branch manager cannot. This is a **category** rule, not a curated list of venues we happen to dislike. |
-| Indoor context | Name/address contains `INDOOR_CONTEXT_TERMS` (food court, shopping centre, arcade…) | A unit inside a container has no street frontage to dress. Nothing for the product to improve. |
+| Chain blocklist | Whole-word match against `CHAIN_BLOCKLIST` | Outreach needs an owner who can say yes to a planter. A branch manager cannot. This is a **category** rule, not a curated list of venues we happen to dislike. |
+| Indoor context | Name/address matches `INDOOR_CONTEXT_TERMS` (food court, shopping centre, arcade…) | A unit inside a container has no street frontage to dress. Nothing for the product to improve. |
 | Business status | `business_status == "OPERATIONAL"` | Don't pitch a closed business. |
 | Review floor | `user_ratings_total >= MIN_USER_RATINGS` (5) | Near-zero reviews usually means closed-but-unmarked, relocated, or a ghost kitchen with no frontage. A low bar: it excludes noise, not small shops. |
 
-Survivors are sorted by review count descending. **This is an ordering, not a selection** — it decides who meets the expensive stages first under `MAX_VENUES`; every venue still has to pass the vision gates on its own merit.
+Survivors are sorted by review count descending, and the top `MAX_VENUES` enter the paid stages. **This is an ordering, not a selection** — it decides who meets the expensive stages first; every venue still has to pass the vision gates on its own merit. The shortlist is global rather than per-area, so the mix follows the data rather than a quota (the run in §2.4 produced 2 Soho, 1 Clapham).
+
+### 2.1.1 What is scoped for cost, and what is actually limited
+
+Two numbers here are deliberately small, and it is worth being precise about which is a real constraint and which is a prototype's budget.
+
+**`MAX_VENUES` is a cost guard, nothing more.** Every venue past this point costs a billed image generation, and the cap exists so a debugging loop cannot spend 20 of them by accident. It is a run parameter, adjustable from the UI, clamped server-side. In production it goes.
+
+**The five areas are a targeting input, not curation.** The distinction matters and it is the one to be clear about on a call: *curating venues* means naming the cafes you want, which is what the brief forbids and what this pipeline never does — no venue name exists anywhere in the codebase. *Choosing where to prospect* is a business decision a client makes ("target Zone 1–2 hospitality"), and it is a legitimate input to an automated system, not a substitute for one.
+
+**But five hand-listed districts is not what 5,000 venues/week looks like**, and that should be said plainly rather than defended. A production sweep would enumerate systematically — all ~300 London postcode districts, or a lat/lng grid with radius search over Greater London — and let the funnel do exactly what it already does with the results.
+
+The reason that is a config change and not a rewrite: `LONDON_AREAS` is a tuple that nothing downstream reads. Discovery crosses it with the category templates and dedupes by `place_id`; every stage after that sees a `VenueCandidate` and has no idea how many areas produced it. **Swapping five districts for three hundred touches one constant.** The cost of running it is the real limit, not the architecture.
 
 ### 2.2 The assessment prompt
 
@@ -147,12 +172,16 @@ Run `20260716-235319-f88e2c`. Generated from the database by
 | Pulled from Google Places | **285** | Text Search across 5 areas × 3 categories |
 | Survived chain / indoor filters | 279 | Name blocklist + container terms |
 | Survived status / review filters | 279 | OPERATIONAL, ≥ 5 reviews |
-| Entered the paid stages | 12 | Capped by `MAX_VENUES` |
+| Entered the paid stages | 10 | Shortlist capped at 12 (`MAX_VENUES`); the run stopped early on reaching `target_accepted` |
 | Frontage photographed | 10 | Street View, or Places Photos fallback |
 | Passed vision assessment | 4 | Entrance visible, framing usable, bare enough |
 | Scale measured | 4 | Door found and within sanity bounds |
-| Composite generated | 3 | Nano Banana returned an image |
+| Composite generated | 4 | Nano Banana returned an image |
 | **Accepted** | **3** | **Passed verification — safe to send** |
+
+**Read the last two rows together: 4 composites were generated and 3 were sent.** The fourth is Gloria, below. And the shortlist held 12 — the run photographed 10 and stopped, because the third acceptance came before the shortlist ran out. `MAX_VENUES` is a ceiling, not a quota.
+
+Every drop between two rows above is one venue with a rejection row here explaining it. That is checked, not asserted: `design_tables.py` reconciles the two tables and refuses to print either if they disagree, because a funnel that quietly stops adding up is the failure this table exists to prevent.
 
 Every rejection, with the reason the pipeline recorded:
 
@@ -323,7 +352,7 @@ Extracted from the brief PDF into [`backend/data/products/`](backend/data/produc
 | `corten_column` | Corten weathering-steel square column, rust-orange patina, mitred edges, brushed-metal maker's plaque. Paired with a matching lower cube. | 1.00 m | 0.50 m | ~1.90 m |
 | `white_tapered` | Gloss-white tapered square (inverted truncated pyramid), narrow base, fine line-art graphic on the face. Supplied as a matched pair. | 0.65 m | 0.45 m | ~1.05 m |
 
-> **Assumption, stated plainly.** The client supplied no spec sheet. These dimensions are **estimated from the reference photography** against the pavement slabs, doorways and furniture in each shot. They all land inside the brief's stated ~0.8–1.2 m range, but they are the first thing to replace with real figures — they propagate directly into `expected_planter_px` and therefore into both the composite prompt and the verifier's tolerance check.
+> **Assumption, stated plainly.** No spec sheet was supplied, so these dimensions are **estimated from the reference photography** — read against the pavement slabs, doorways and furniture visible in each shot. They are the single most valuable thing to replace with real figures: `body_height_m` sets `expected_planter_px`, which drives both the composite prompt and the tolerance the verifier checks against, so an error here biases every visual *and* the check meant to catch it. **This is the first question to ask the client.**
 
 **Preparation.** The three supplied images are *lifestyle shots, not product plates*. Each contains an entire storefront behind the planter, and `planter_3` has motion-blurred pedestrians walking across the front of it. Handed to an image model as "this is the product", the background reads as part of the instruction — the composite comes back with a Dutch shopfront pasted onto a Shoreditch cafe, and the verifier correctly rejects it as "building altered."
 
@@ -526,7 +555,7 @@ Both retry loops live in the orchestrator rather than inside a stage, and neithe
 
 The verifier and the composer are both Gemini, and the verifier is judging a generation from the same family of models. That is a real weakness and worth naming rather than hiding.
 
-Three things blunt it: the verifier is a **different model** (`gemini-2.5-flash`, not the image model) doing a **different task** (comparison, not generation); it is given the original as ground truth rather than asked to judge the composite alone; and its verdict is **not what we act on** — we recompute the decision from constants, and when the model says "accept" and the rules say "reject", the rules win and the disagreement is logged. In practice that disagreement is almost always the model being lenient about its own output, which is exactly the bias you would predict.
+Three things blunt it: the verifier is a **different model** (`gemini-3.5-flash`, not the image model) doing a **different task** (comparison, not generation); it is given the original as ground truth rather than asked to judge the composite alone; and its verdict is **not what we act on** — we recompute the decision from constants, and when the model says "accept" and the rules say "reject", the rules win and the disagreement is logged. In practice that disagreement is almost always the model being lenient about its own output, which is exactly the bias you would predict.
 
 The genuinely robust version is a non-generative check — a structural diff (SSIM/edge-map) over the region *outside* the planter's bounding box to catch building alteration mechanically. That is the first thing I would add with more time; see §8.
 
@@ -586,6 +615,8 @@ def capture_frontage(venue, out_dir, heading_nudge=0.0, attempt=1) -> Capture | 
 | **Stale imagery** | Street View can be years old. We may assess a frontage as bare that has had planters since 2023. | Use the panorama `date` from metadata (already captured) as a freshness filter — a config threshold, ~10 lines. Or first-party capture. |
 | **Chain matching is name-based** | Now word-boundary matched (§2.4), so the two known false positives are gone — but it is still a name blocklist, and a chain that isn't on it walks straight through. | A Places `types` / chain signal, or a brand dataset. The list is a stopgap that will not scale to every chain in London. |
 | **Product dimensions are estimates** | `PRODUCT_SPECS` heights were read off the client's photos, not a spec sheet. They set the expected planter size, so a wrong figure biases every composite *and* the verifier that checks it. | Ask the client for real dimensions. This is the highest-value correction available and the cheapest. |
+| **The search is five hand-listed districts** | Not curation — no venue is named anywhere (§2.1.1) — but not a London-wide sweep either. | Enumerate all ~300 postcode districts, or grid Greater London with radius search. `LONDON_AREAS` is a tuple nothing downstream reads, so this is a config change. The limit is spend, not architecture. |
+| **The product catalogue lives in `config.py`** | `PRODUCT_SPECS` is *data*, not configuration — a client's catalogue sitting in a settings module. Fine for three fixed planters; wrong the moment the range changes without a deploy. | Move it to the database (it already has one) or a `products.json`, loaded at startup. The rest of `config.py` — thresholds, prices, model strings — genuinely is configuration and belongs where it is. |
 | **Rate limits shape the run** | On a free Gemini key the pipeline paces itself to ~1 call/13s, making a run minutes long. | Billing. The pacing floor drops to 0 and the run is bounded by generation latency instead. |
 
 ### Cost per venue
@@ -624,19 +655,21 @@ At 5,000 venues/week, discovery amortises to near-nothing and the bill is essent
 4. **Panorama freshness gate** using the `date` already captured.
 5. **First-party capture behind the existing `capture_frontage` seam** — fixes the licence and the resolution ceiling together.
 
-### One deliberate deviation: a database
+### Why there is a database at all
 
-The brief says "do not add … a database." This adds one — Supabase (Postgres + storage) — and the deviation is considered rather than careless.
+A prototype could reasonably have written its results to a JSON file, and this one did at first. It moved to Supabase (Postgres + a storage bucket) for one reason: **a run that leaves no record cannot be defended.**
 
-The reason is durability. Without it, a run triggered on the deployed backend writes to a container filesystem that resets on restart: the "live" path proves the pipeline runs but keeps no record. For a prototype whose whole point is *automated, defensible, repeatable* decisions, throwing away every run's decision trail is a real loss. Durable history — every run's funnel, every venue's trail, every generated image, browsable and comparable side by side — is a genuine improvement, not gold-plating. It is also what lets §2.4 and §3 of this document be generated from the record rather than typed.
+Deployed, the backend runs on a container filesystem that resets on restart, so a JSON file means the live path proves the pipeline works and then forgets it did. For a system whose entire claim is *automated, repeatable, inspectable* decisions, discarding every run's decision trail is the wrong thing to discard. With the database, every run's funnel, every venue's trail and every generated image is kept and comparable side by side — and §2.4 and §3 of this document are generated from that record rather than typed, which is the only reason they can be trusted.
 
-It is built so the deviation stays contained:
+It is scoped so it stays a detail rather than a dependency:
 
 - **Isolated.** All SQL lives in `repository.py`; all bucket layout in `storage.py`. No stage imports either — the orchestrator persists, the same way it orchestrates. Swapping Postgres for anything else is one module.
-- **Fail-soft.** A run costs money in image generation. Every write logs-and-continues rather than raising, so a database outage degrades the run to "not recorded" instead of losing it.
+- **Fail-soft.** A run costs real money in image generation. Every write logs-and-continues rather than raising, so a database outage degrades a run to "not recorded" instead of losing it.
 - **Correct trust boundary.** The backend writes with the `service_role` key; row-level security grants the public `anon` key SELECT and nothing else. Shipping the anon key to a browser is safe by construction, not by convention.
 
 The schema keeps `venues` (facts about London) separate from `run_results` (judgements made at a point in time), so re-running adds history rather than overwriting it — you can ask whether a venue's bareness score changed after a Street View refresh. Rejections carry `kind` (`decision` vs `error`) at the column level, so a quota 429 is never aggregated as a judgement the pipeline never made.
+
+The four migrations in [`supabase/migrations/`](supabase/migrations/) are the whole schema: run them in order and the system stands up.
 
 ### What I deliberately did *not* build
 

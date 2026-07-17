@@ -335,6 +335,12 @@ def _process_venue(
         venue, cap, measurement, assessment.product_slug, plates, out_dir, run_id, model, status
     )
     if isinstance(cv, Rejection):
+        # A rejection at "verify" means an image WAS generated and the verifier
+        # refused it — that venue belongs in composite_ok. Only a "composite"
+        # rejection means no image came back. Counting it any other way makes
+        # composite_ok a duplicate of accepted, and hides the loop's whole point.
+        if cv.stage == "verify":
+            funnel.composite_ok += 1
         return cv
 
     comp, verification = cv
@@ -483,8 +489,14 @@ def run_pipeline(
 
         # Cap what enters the paid stages. Discovery still pulled the full set,
         # so the funnel stays honest.
+        #
+        # entered_pipeline is NOT set to len(shortlist): the loop below stops the
+        # moment target_accepted is reached, so the shortlist is an upper bound,
+        # not an attendance record. Counting the cap here would show venues
+        # dropping out at capture that were never photographed at all. It is
+        # incremented per venue instead; the cap itself is already recorded on
+        # the run as settings.max_venues.
         shortlist = candidates[:max_venues]
-        funnel.entered_pipeline = len(shortlist)
         status.venue_total = len(shortlist)
         log.info(
             "%d candidates survived discovery; %d enter the paid stages (max_venues=%d)",
@@ -503,6 +515,7 @@ def run_pipeline(
                 log.info("reached target_accepted=%d — stopping early", target_accepted)
                 break
 
+            funnel.entered_pipeline += 1
             status.venue = venue.name
             status.venue_index = i
             status.stage = "capture"

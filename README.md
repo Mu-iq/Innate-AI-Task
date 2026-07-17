@@ -6,8 +6,9 @@ An automated prospecting engine for a London outdoor-planter supplier. It finds 
 
 **Live demo:** https://innate-ai-task.vercel.app/
 
-**[design.md](design.md)** — the reasoning: automated venue selection, image sourcing, the compositing
-method, fallback logic, imagery rights, and the rejection criteria. Read that second.
+**Read this first** — what it is, how to run it, and the assumptions it makes. **Then
+[design.md](design.md)** for the reasoning: automated venue selection, image sourcing, the
+compositing method, fallback logic, imagery rights, and the rejection criteria.
 
 ---
 

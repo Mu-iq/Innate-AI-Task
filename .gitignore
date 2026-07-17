@@ -32,7 +32,6 @@ frontend/.vite/
 Thumbs.db
 .idea/
 .vscode/
-supabase/
 
 # Run results and generated images are stored in the database and the storage
 # bucket, not in the repo. There is no committed results.json or public outputs

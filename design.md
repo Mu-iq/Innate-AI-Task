@@ -181,7 +181,7 @@ Run `20260716-235319-f88e2c`. Generated from the database by
 
 **Read the last two rows together: 4 composites were generated and 3 were sent.** The fourth is Gloria, below. And the shortlist held 12 — the run photographed 10 and stopped, because the third acceptance came before the shortlist ran out. `MAX_VENUES` is a ceiling, not a quota.
 
-Every drop between two rows above is one venue with a rejection row here explaining it. That is checked, not asserted: `design_tables.py` reconciles the two tables and refuses to print either if they disagree, because a funnel that quietly stops adding up is the failure this table exists to prevent.
+Every drop between two rows above, other than the shortlist cap, is one venue with a rejection row here explaining it. That is checked, not asserted: `design_tables.py` reconciles the two tables and refuses to print either if they disagree, because a funnel that quietly stops adding up is the failure this table exists to prevent.
 
 Every rejection, with the reason the pipeline recorded:
 

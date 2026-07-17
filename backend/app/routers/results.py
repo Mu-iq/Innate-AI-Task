@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ResultsPayload, RunSummary, VenueResult
-from app.services import repository
+from app.services import repository, storage
 
 router = APIRouter(prefix="/api", tags=["results"])
 
@@ -54,6 +54,27 @@ def get_results(
     # No specific run requested and none exist yet.
     _require_db()
     return ResultsPayload(source="database")
+
+
+@router.delete("/runs/{run_key}")
+def delete_run(run_key: str) -> dict[str, object]:
+    """Delete a run: its row, its results, and its images in the bucket.
+
+    Images go first. If the row went first and the bucket call then failed, the
+    files would be orphaned with nothing left pointing at them — unreachable, and
+    still billed for. This order can at worst leave a run with missing images,
+    which is visible and fixable.
+
+    `venues` are never touched: a venue is a fact about London, not this run's
+    output, and other runs' results still reference it.
+    """
+    _require_db()
+
+    removed = storage.delete_run_objects(run_key)
+    if not repository.delete_run(run_key):
+        raise HTTPException(status_code=404, detail=f"No run with key {run_key}")
+
+    return {"deleted": run_key, "objects_removed": removed}
 
 
 @router.get("/results/{venue_id}", response_model=VenueResult)

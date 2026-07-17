@@ -115,6 +115,47 @@ def upload_file(path: str, local: Path) -> str | None:
     return upload_bytes(path, local.read_bytes())
 
 
+def delete_run_objects(run_key: str) -> int:
+    """Remove every object a run wrote. Returns how many were deleted.
+
+    Called when a run is deleted: the database row going without its images would
+    leave the bucket accumulating files nothing references and nobody can reach.
+
+    Never raises — a storage hiccup should not stop the run row being removed.
+    Worst case is orphaned files, which is what we were trying to avoid, but it
+    is strictly better than a half-deleted run that still shows in the history.
+    """
+    client = supabase_client.get_client()
+    if client is None:
+        return 0
+
+    prefix = f"runs/{_safe(run_key)}"
+    bucket = client.storage.from_(SUPABASE_BUCKET)
+    removed = 0
+
+    try:
+        # Objects live one directory per venue, so list the venue folders and
+        # then their contents. Supabase's list() is not recursive.
+        for venue_dir in bucket.list(prefix) or []:
+            name = venue_dir.get("name")
+            if not name:
+                continue
+            paths = [
+                f"{prefix}/{name}/{f['name']}"
+                for f in (bucket.list(f"{prefix}/{name}") or [])
+                if f.get("name")
+            ]
+            if paths:
+                bucket.remove(paths)
+                removed += len(paths)
+    except Exception as exc:
+        log.warning("could not fully clean bucket for %s: %s", run_key, str(exc)[:160])
+
+    if removed:
+        log.info("removed %d object(s) for run %s", removed, run_key)
+    return removed
+
+
 def public_url(path: str | None) -> str | None:
     """Public URL for an object path. None if storage is off or path is empty.
 

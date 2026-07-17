@@ -102,6 +102,17 @@ export function imageUrl(pathOrUrl: string): string {
 export interface RunSettingsInput {
   max_venues?: number;
   target_accepted?: number;
+  allow_duplicates?: boolean;
+}
+
+/** Delete a run, its results, and its images. Throws so the caller can report. */
+export async function deleteRun(runKey: string): Promise<void> {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/runs/${encodeURIComponent(runKey)}`,
+    { method: 'DELETE' },
+    30_000,
+  );
+  if (!res.ok) throw new Error(`Could not delete that run (HTTP ${res.status})`);
 }
 
 export interface StartRunResult {

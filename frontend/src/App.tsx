@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  deleteRun,
   getHealth,
   getStatus,
   hasBackend,
@@ -30,6 +31,15 @@ import type { ResultsPayload, RunStatus, RunSummary } from './types';
 const POLL_MS = 2000;
 
 /**
+ * Consecutive failed polls before we call a run lost.
+ *
+ * A run makes dozens of poll requests over several minutes; one dropped packet,
+ * or a backend restart, must not be reported as a dead run. Five misses is ~10s
+ * of genuine silence.
+ */
+const POLL_MAX_MISSES = 5;
+
+/**
  * How often to re-attempt the live backend while it is not connected.
  *
  * The backend is frequently not up at the moment the page loads: uvicorn is
@@ -40,17 +50,43 @@ const POLL_MS = 2000;
  */
 const RECONNECT_MS = 10_000;
 
+/**
+ * The funnel, left to right.
+ *
+ * Each bar is scaled within its own PHASE, not against the single largest number.
+ * That is deliberate: discovery works in hundreds and the paid pipeline is capped
+ * at single digits, so one shared scale renders 8, 3 and 2 as three identical
+ * slivers — hiding the only part a reader actually cares about. Scaling per phase
+ * means each bar answers "what fraction of this phase's intake survived", which is
+ * the honest question for both halves.
+ *
+ * The step between the phases is a deliberate cap (MAX_VENUES), not a rejection,
+ * so it starts the second phase at full width rather than reading as a 97% cull.
+ */
 function FunnelBar({ data }: { data: ResultsPayload }) {
   const f = data.funnel;
-  const steps = [
+
+  const discovery = [
     { label: 'Discovered', n: f.discovered },
     { label: 'Passed filters', n: f.after_status_filter },
+  ];
+  const pipeline = [
     { label: 'Entered pipeline', n: f.entered_pipeline },
     { label: 'Photographed', n: f.capture_ok },
     { label: 'Assessed usable', n: f.assess_ok },
     { label: 'Composited', n: f.composite_ok },
     { label: 'Accepted', n: f.accepted },
   ];
+
+  // Guard both divides: a run that found nothing must not produce NaN widths.
+  const discoveryPeak = Math.max(f.discovered, 1);
+  const pipelinePeak = Math.max(f.entered_pipeline, 1);
+
+  const steps = [
+    ...discovery.map((s) => ({ ...s, pct: (s.n / discoveryPeak) * 100 })),
+    ...pipeline.map((s) => ({ ...s, pct: (s.n / pipelinePeak) * 100 })),
+  ];
+
   return (
     <ol className="funnel">
       {steps.map((s, i) => (
@@ -60,6 +96,11 @@ function FunnelBar({ data }: { data: ResultsPayload }) {
         >
           <span className="funnel__n">{s.n}</span>
           <span className="funnel__label">{s.label}</span>
+          {/* Floor of 3% so a surviving step is never invisible. */}
+          <span
+            className="funnel__bar"
+            style={{ width: `${s.n === 0 ? 0 : Math.max(3, s.pct)}%` }}
+          />
         </li>
       ))}
     </ol>
@@ -139,27 +180,65 @@ export default function App() {
   const poll = useCallback(
     (runId: string) => {
       if (timer.current) window.clearInterval(timer.current);
+
+      // A run takes minutes and makes dozens of poll requests. Treating the
+      // first failed one as fatal declares the run dead over a single dropped
+      // packet — which it did, on runs that then completed perfectly. Only give
+      // up after several consecutive failures.
+      let misses = 0;
+      let lastProcessed = -1;
+
       timer.current = window.setInterval(async () => {
         try {
           const s = await getStatus(runId);
+          misses = 0;
           setStatus(s);
-          // Refresh history mid-run so its live counters tick, not just at the end.
           void refreshRuns();
+
+          // Pull the run's own data whenever a venue finishes, so the funnel and
+          // the cards below track the run in progress instead of sitting on the
+          // previous run's results until the end.
+          if (s.processed !== lastProcessed) {
+            lastProcessed = s.processed;
+            void load(null);
+          }
+
           if (s.done) {
             if (timer.current) window.clearInterval(timer.current);
             setRunning(false);
-            // A finished run becomes the latest. Snap to it and pull fresh stats.
             setSelectedRun(null);
             await load(null);
           }
         } catch {
-          if (timer.current) window.clearInterval(timer.current);
-          setRunning(false);
-          setRunError('Lost the connection while the run was in progress. Please try again.');
+          misses += 1;
+          if (misses >= POLL_MAX_MISSES) {
+            if (timer.current) window.clearInterval(timer.current);
+            setRunning(false);
+            setRunError(
+              'Lost contact with the run. It may still be going — check the run history below.',
+            );
+            void load(null);
+          }
         }
       }, POLL_MS);
     },
     [load, refreshRuns],
+  );
+
+  /** Delete a run, then reload. If it was the one on screen, fall back to latest. */
+  const onDeleteRun = useCallback(
+    async (runKey: string) => {
+      try {
+        await deleteRun(runKey);
+      } catch (e) {
+        setRunError((e as Error).message);
+        return;
+      }
+      const next = selectedRun === runKey ? null : selectedRun;
+      setSelectedRun(next);
+      await load(next);
+    },
+    [selectedRun, load],
   );
 
   const onRun = useCallback(
@@ -170,13 +249,18 @@ export default function App() {
       try {
         const { run_id, adopted } = await startRun(settings);
         if (adopted) setRunError('A run is already in progress — showing its results.');
+        // Switch to the new run at once. Without this the page keeps showing the
+        // previous run's funnel and venues while the new one works, which reads
+        // as results that belong to the run you just started.
+        setSelectedRun(null);
+        await load(null);
         poll(run_id);
       } catch (e) {
         setRunning(false);
         setRunError((e as Error).message);
       }
     },
-    [poll],
+    [poll, load],
   );
 
   // Still connecting, nothing to show yet.
@@ -265,7 +349,13 @@ export default function App() {
           actually available, so an unconfigured deployment simply doesn't have
           the panel rather than displaying setup instructions to a viewer. */}
       {hasBackend() && health?.persistence === 'on' && (
-        <RunHistory runs={runs} selected={selectedRun} onSelect={onSelectRun} running={running} />
+        <RunHistory
+          runs={runs}
+          selected={selectedRun}
+          onSelect={onSelectRun}
+          onDelete={onDeleteRun}
+          running={running}
+        />
       )}
 
       <section className="section">

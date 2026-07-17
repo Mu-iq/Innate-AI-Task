@@ -4,8 +4,10 @@ An automated prospecting engine for a London outdoor-planter supplier. It finds 
 
 **No venue in the output was chosen by a human.** Every accept and reject is a named constant in [`backend/app/config.py`](backend/app/config.py).
 
-- **[design.md](design.md)** — the reasoning: every threshold and why it holds that value, the prompts, the imagery-rights position, cost, and what breaks at 5,000 venues/week.
-- **[WALKTHROUGH.md](WALKTHROUGH.md)** — a line-by-line tour of how the code actually runs, end to end.
+**Live demo:** https://innate-ai-task.vercel.app/
+
+**[design.md](design.md)** — the reasoning: automated venue selection, image sourcing, the compositing
+method, fallback logic, imagery rights, and the rejection criteria. Read that second.
 
 ---
 
@@ -61,7 +63,7 @@ SUPABASE_BUCKET=storefront-visuals
 ```bash
 cd backend
 pip install -r requirements.txt
-python -m pytest tests/ -q      # 15 checks on the geo maths
+python -m pytest tests/ -q      # geo maths + discovery filters
 python run.py                   # http://localhost:8001/docs
 ```
 
@@ -135,8 +137,6 @@ The database stores object **paths**; public URLs are derived at read time, so r
 
 Backend → **Cloud Run** ([`backend/Dockerfile`](backend/Dockerfile)), frontend → **Vercel** ([`vercel.json`](vercel.json)), data in **Supabase**.
 
-Full steps, flags and gotchas: **[DEPLOY.md](DEPLOY.md)**.
-
 The short version:
 
 ```bash
@@ -151,6 +151,26 @@ Then import the repo on Vercel, set `VITE_API_BASE_URL` to the Cloud Run URL, an
 > **`--no-cpu-throttling` is not optional.** `/api/run` does its work in a background task after the
 > response returns, and Cloud Run throttles CPU to ~0 once a response is sent. Without the flag a run
 > starts, hands back a `run_id`, and then freezes for ever.
+
+---
+
+## Assumptions
+
+1. **The planter dimensions are estimates.** The client supplied three reference photos but no spec
+   sheet, so the heights in `PRODUCT_SPECS` (0.65–1.00 m vessels) are read off the photography
+   against pavement slabs and doorways. They set the expected planter size in every composite, so
+   they're the first thing to replace with real figures.
+2. **A UK commercial doorway is 2.03 m** — a 1981 mm leaf plus frame. This is the scale anchor for
+   the whole pipeline. Real shopfront doors vary (2.0–2.3 m), so it carries ~10% error, which is
+   precisely why `SCALE_TOLERANCE` is 40% rather than 10% (design.md §6.2).
+3. **Scale is measured on the vessel, never the planting.** The palm in `planter_2` is ~2 m and
+   foliage is seasonal; the pot is a manufactured constant, so it's the only number the verifier can
+   check against.
+4. **Street View imagery is current enough.** It can be years old — a frontage assessed as bare may
+   have been planted since the survey car passed.
+5. **The three reference photos are the client's complete catalogue.**
+6. **A venue with an owner is a venue worth pitching.** The chain blocklist assumes a branch manager
+   can't say yes to a planter, so chains are filtered out regardless of how bare their frontage is.
 
 ---
 
@@ -170,11 +190,9 @@ GET  /api/health           → key presence (never values), persistence state, s
 
 ```
 ├── design.md                      ← the reasoning, and the decisions to defend
-├── WALKTHROUGH.md                 ← how the code runs, in detail
 ├── README.md
 ├── .env.example
-├── DEPLOY.md                      ← Cloud Run + Vercel, step by step
-├── vercel.json                    ← frontend build (monorepo-aware)
+├── vercel.json                    ← frontend build config
 ├── supabase/migrations/           ← run these first: tables + storage bucket
 ├── backend/
 │   ├── Dockerfile                 ← the Cloud Run image
@@ -193,7 +211,8 @@ GET  /api/health           → key presence (never values), persistence state, s
 │       ├── clients/               ← gemini.py, google_maps.py (retry, pacing, cache)
 │       └── utils/                 ← geo.py (bearing), images.py, cache.py, metrics.py, logging.py
 │   ├── scripts/                   ← run_pipeline.py, design_tables.py, probe_image_model.py
-│   ├── tests/test_geo.py          ← the only maths that can be silently wrong
+│   ├── tests/                     ← geo bearings + discovery filters: the two
+│   │                                places a silent error looks like a decision
 │   └── data/products/             ← the client's three real planters
 └── frontend/src/
     ├── App.tsx

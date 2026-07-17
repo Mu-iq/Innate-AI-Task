@@ -115,7 +115,11 @@ export interface Thresholds {
 
 export interface RunStatus {
   run_id: string;
+  /** Machine stage name: setup | discover | capture | assess | measure | composite | verify | done */
   stage: string;
+  venue: string | null;
+  venue_index: number;
+  venue_total: number;
   processed: number;
   accepted: number;
   rejected: number;
@@ -153,6 +157,7 @@ export interface RunCost {
 export interface RunSettings {
   max_venues: number;
   target_accepted: number;
+  allow_duplicates: boolean;
 }
 
 export interface RunSummary {
@@ -167,6 +172,7 @@ export interface RunSummary {
   image_model: string;
   max_venues: number | null;
   target_accepted: number | null;
+  allow_duplicates: boolean;
   total_cost_usd: number;
   discovered: number;
   entered_pipeline: number;

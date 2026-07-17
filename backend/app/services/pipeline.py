@@ -87,8 +87,27 @@ def _capture_and_assess(
     venue: VenueCandidate,
     out_dir: Path,
     run_id: str,
+    status: RunStatus | None = None,
 ) -> tuple[Capture, Assessment] | Rejection:
-    """Photograph the frontage and judge it, with one re-shoot on a bad framing.
+    """Photograph the frontage and judge it, escalating through the sources.
+
+        1. Street View at the computed heading
+        2. still bad framing?  -> re-shoot the same panorama at +25 deg
+        3. still bad framing?  -> the venue's own Google Business photos
+        4. give up, with the last attempt's reasons
+
+    Steps 2 and 3 answer different failures, which is why both exist. A nudge
+    fixes a door sitting at the frame edge. It cannot fix a parked van, a
+    lamppost, or a survey car that drove past at a raking angle — those are
+    obstructions in the world, and no heading moves them. That is the brief's
+    "if Street View coverage is poor OR FACES THE WRONG WAY, fall back to another
+    source", and in central London it is the difference between one accepted
+    venue and several.
+
+    Escalation only ever happens for FRAMING failures. A frontage that simply is
+    not bare is a fact about the venue, not the photograph — another angle or
+    another source will not change it, and trying would just spend money to reach
+    the same conclusion.
 
     Returns the accepted (capture, assessment) pair, or a Rejection carrying the
     reasons from the final attempt.
@@ -97,14 +116,16 @@ def _capture_and_assess(
     if isinstance(cap, Rejection):
         return cap
 
+    if status is not None:
+        status.stage = "assess"
     assessment = assess_svc.assess_frontage(venue, cap, run_id, attempt=1)
     if isinstance(assessment, Rejection):
         return assessment
     if assessment.accepted:
         return cap, assessment
 
-    # One re-shoot, only if a different angle could plausibly help, and only on
-    # Street View -- a Places photo has no heading to nudge.
+    # [2] Re-shoot the same panorama at an offset heading. Street View only —
+    # a Places photo has no heading to nudge.
     if assess_svc.is_framing_failure(assessment) and cap.image_source == "streetview":
         log.info("%s: reshooting at %+.0f deg after framing rejection", venue.name, HEADING_NUDGE_DEG)
 
@@ -118,6 +139,26 @@ def _capture_and_assess(
                 return cap2, assessment2
             if isinstance(assessment2, Assessment):
                 assessment = assessment2  # report the second attempt's reasons
+                cap = cap2
+
+    # [3] Change source. Street View has now failed twice on framing, so stop
+    # asking it and try the venue's own photography.
+    if (
+        assess_svc.is_framing_failure(assessment)
+        and cap.image_source == "streetview"
+        and venue.photo_names
+    ):
+        log.info("%s: street view framing unusable — falling back to Places photos", venue.name)
+
+        cap3 = capture_svc.capture_from_places_photos(venue, out_dir, attempt=3)
+        if isinstance(cap3, Capture):
+            assessment3 = assess_svc.assess_frontage(venue, cap3, run_id, attempt=3)
+            if isinstance(assessment3, Assessment) and assessment3.accepted:
+                log.info("%s: the venue's own photo worked where street view didn't", venue.name)
+                return cap3, assessment3
+            if isinstance(assessment3, Assessment):
+                assessment = assessment3
+                cap = cap3
 
     return Rejection(
         venue_id=venue.id,
@@ -144,6 +185,7 @@ def _composite_and_verify(
     out_dir: Path,
     run_id: str,
     model: str,
+    status: RunStatus | None = None,
 ) -> tuple[Composite, Verification] | Rejection:
     """Generate and verify, retrying once with the verifier's own complaints.
 
@@ -170,6 +212,8 @@ def _composite_and_verify(
         if isinstance(comp, Rejection):
             return comp
 
+        if status is not None:
+            status.stage = "verify"
         verification = verify_svc.verify_composite(
             venue=venue,
             frontage_path=Path(cap.image_path),
@@ -250,14 +294,24 @@ def _process_venue(
     model: str,
     funnel: Funnel,
     db_run_id: str | None,
+    status: RunStatus | None = None,
 ) -> VenueResult | Rejection:
     """One venue, all six stages. Returns a result or the reason it failed.
+
+    `status` is updated as each stage starts so a watcher sees the pipeline move
+    rather than a spinner. It is optional: the CLI entrypoint has no one to tell.
 
     Accepted venues are persisted here, because this is the only scope that holds
     the bucket paths. Rejections are persisted by the caller, which is the only
     scope that still holds the VenueCandidate a rejection needs.
     """
-    ca = _capture_and_assess(venue, out_dir, run_id)
+
+    def at(stage: str) -> None:
+        if status is not None:
+            status.stage = stage
+
+    at("capture")
+    ca = _capture_and_assess(venue, out_dir, run_id, status)
     if isinstance(ca, Rejection):
         if ca.stage == "capture":
             return ca
@@ -268,6 +322,7 @@ def _process_venue(
     funnel.capture_ok += 1
     funnel.assess_ok += 1
 
+    at("measure")
     measurement = measure_svc.measure_frontage(
         venue, cap, assessment.product_slug, run_id, attempt=cap.attempt
     )
@@ -275,8 +330,9 @@ def _process_venue(
         return measurement
     funnel.measure_ok += 1
 
+    at("composite")
     cv = _composite_and_verify(
-        venue, cap, measurement, assessment.product_slug, plates, out_dir, run_id, model
+        venue, cap, measurement, assessment.product_slug, plates, out_dir, run_id, model, status
     )
     if isinstance(cv, Rejection):
         return cv
@@ -336,12 +392,16 @@ def run_pipeline(
     run_id: str | None = None,
     max_venues: int | None = None,
     target_accepted: int | None = None,
+    allow_duplicates: bool = True,
 ) -> ResultsPayload:
     """Run the whole thing. Blocking; the router calls it as a background task.
 
     max_venues / target_accepted override the config defaults for this run only.
     The router has already clamped them to the hard caps; here they simply take
     effect. Falling back to config keeps the CLI entrypoint working unchanged.
+
+    allow_duplicates=False skips venues an earlier run already accepted, so the
+    budget goes on new frontages instead of regenerating a visual that exists.
     """
     run_id = run_id or new_run_id()
     max_venues = MAX_VENUES if max_venues is None else max_venues
@@ -368,7 +428,11 @@ def run_pipeline(
     # every repository call below becomes a no-op. Persistence upgrades a run; it
     # must never be able to fail one.
     db_run_id = repository.create_run(
-        run_id, dry_run=DRY_RUN, max_venues=max_venues, target_accepted=target_accepted
+        run_id,
+        dry_run=DRY_RUN,
+        max_venues=max_venues,
+        target_accepted=target_accepted,
+        allow_duplicates=allow_duplicates,
     )
 
     try:
@@ -399,10 +463,29 @@ def run_pipeline(
         if not candidates:
             raise RuntimeError("Discovery returned no candidates — check the Maps API key")
 
+        # Skip venues an earlier run already turned into a visual, so this run
+        # spends its budget on new frontages. Applied AFTER discovery so the
+        # funnel still reports what was really out there.
+        if not allow_duplicates:
+            seen = repository.accepted_place_ids()
+            if seen:
+                before = len(candidates)
+                candidates = [c for c in candidates if c.id not in seen]
+                log.info(
+                    "duplicates off: skipped %d venue(s) accepted by earlier runs",
+                    before - len(candidates),
+                )
+            if not candidates:
+                raise RuntimeError(
+                    "Every candidate has already been accepted by an earlier run. "
+                    "Turn duplicates back on, or widen the search areas in config."
+                )
+
         # Cap what enters the paid stages. Discovery still pulled the full set,
         # so the funnel stays honest.
         shortlist = candidates[:max_venues]
         funnel.entered_pipeline = len(shortlist)
+        status.venue_total = len(shortlist)
         log.info(
             "%d candidates survived discovery; %d enter the paid stages (max_venues=%d)",
             len(candidates),
@@ -410,16 +493,24 @@ def run_pipeline(
             max_venues,
         )
 
+        # Publish the discovery half of the funnel now: it is already final, and
+        # a watcher should see 285 immediately rather than after the first venue.
+        repository.update_run(db_run_id, **repository.funnel_columns(funnel))
+
         # [2-6] Per venue.
-        for venue in shortlist:
+        for i, venue in enumerate(shortlist, start=1):
             if len(results) >= target_accepted:
                 log.info("reached target_accepted=%d — stopping early", target_accepted)
                 break
 
-            status.stage = f"processing {venue.name}"
-            repository.update_run(db_run_id, stage=status.stage)
+            status.venue = venue.name
+            status.venue_index = i
+            status.stage = "capture"
+            repository.update_run(db_run_id, stage=f"{venue.name} ({i}/{len(shortlist)})")
 
-            outcome = _process_venue(venue, plates, out_dir, run_id, model, funnel, db_run_id)
+            outcome = _process_venue(
+                venue, plates, out_dir, run_id, model, funnel, db_run_id, status
+            )
             status.processed += 1
 
             if isinstance(outcome, Rejection):
@@ -432,13 +523,16 @@ def run_pipeline(
                 results.append(outcome)
                 status.accepted = len(results)
 
-            # Push counters after every venue so the UI's poll reflects real
-            # progress rather than jumping from 0 to done.
+            # Push the counters AND the funnel after every venue. Writing the
+            # funnel only at the end meant a run in progress reported all zeros
+            # while visibly producing venues — the page contradicted itself.
+            funnel.accepted = len(results)
             repository.update_run(
                 db_run_id,
                 processed=status.processed,
                 accepted=status.accepted,
                 rejected=status.rejected,
+                **repository.funnel_columns(funnel),
             )
 
         funnel.accepted = len(results)
@@ -469,7 +563,11 @@ def run_pipeline(
             people_prominence_threshold=PEOPLE_PROMINENCE_THRESHOLD,
             heading_nudge_deg=HEADING_NUDGE_DEG,
         ),
-        settings=RunSettings(max_venues=max_venues, target_accepted=target_accepted),
+        settings=RunSettings(
+            max_venues=max_venues,
+            target_accepted=target_accepted,
+            allow_duplicates=allow_duplicates,
+        ),
         cost=RunCost(**run_metrics.as_dict()),
         funnel=funnel,
         venues=results,

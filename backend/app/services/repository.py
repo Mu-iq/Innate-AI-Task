@@ -20,6 +20,7 @@ from typing import Any
 
 from app.clients import supabase as supabase_client
 from app.schemas import (
+    Funnel,
     Rejection,
     ResultsPayload,
     RunCost,
@@ -44,6 +45,26 @@ def available() -> bool:
     return supabase_client.is_available()
 
 
+def funnel_columns(f: Funnel) -> dict[str, int]:
+    """A Funnel as `runs` column names.
+
+    One definition, used both mid-run and at finish_run. Two hand-written copies
+    would drift the moment a stage is added — and the mid-run one silently, since
+    nothing checks it.
+    """
+    return {
+        "funnel_discovered": f.discovered,
+        "funnel_after_chain_filter": f.after_chain_filter,
+        "funnel_after_status_filter": f.after_status_filter,
+        "funnel_entered_pipeline": f.entered_pipeline,
+        "funnel_capture_ok": f.capture_ok,
+        "funnel_assess_ok": f.assess_ok,
+        "funnel_measure_ok": f.measure_ok,
+        "funnel_composite_ok": f.composite_ok,
+        "funnel_accepted": f.accepted,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
@@ -55,6 +76,7 @@ def create_run(
     dry_run: bool,
     max_venues: int,
     target_accepted: int,
+    allow_duplicates: bool = True,
 ) -> str | None:
     """Insert a queued run. Returns its uuid, or None if persistence is off."""
     client = supabase_client.get_client()
@@ -71,6 +93,7 @@ def create_run(
                     "dry_run": dry_run,
                     "max_venues": max_venues,
                     "target_accepted": target_accepted,
+                    "allow_duplicates": allow_duplicates,
                 }
             )
             .execute()
@@ -211,20 +234,58 @@ def finish_run(run_id: str | None, payload: ResultsPayload, error: str | None) -
         vision_model=payload.vision_model or None,
         image_model=payload.image_model or None,
         thresholds=payload.thresholds.model_dump(mode="json") if payload.thresholds else {},
-        funnel_discovered=f.discovered,
-        funnel_after_chain_filter=f.after_chain_filter,
-        funnel_after_status_filter=f.after_status_filter,
-        funnel_entered_pipeline=f.entered_pipeline,
-        funnel_capture_ok=f.capture_ok,
-        funnel_assess_ok=f.assess_ok,
-        funnel_measure_ok=f.measure_ok,
-        funnel_composite_ok=f.composite_ok,
-        funnel_accepted=f.accepted,
+        **funnel_columns(f),
         accepted=len(payload.venues),
         rejected=len(payload.rejected),
         total_cost_usd=payload.cost.total_cost_usd if payload.cost else 0,
         metrics=payload.cost.model_dump(mode="json") if payload.cost else {},
     )
+
+
+def accepted_place_ids() -> set[str]:
+    """Google place_ids that any previous run already accepted.
+
+    Used to skip venues when a run asks not to allow duplicates. Empty set on any
+    failure, which fails OPEN on purpose: not knowing the history should mean a
+    normal run, never a run that silently skips everything.
+    """
+    client = supabase_client.get_client()
+    if client is None:
+        return set()
+    try:
+        rows = (
+            client.table("run_results")
+            .select("venues(place_id)")
+            .eq("outcome", "accepted")
+            .execute()
+        ).data or []
+    except Exception as exc:
+        log.warning("could not read accepted venues: %s", str(exc)[:160])
+        return set()
+
+    return {
+        pid
+        for row in rows
+        if (pid := (row.get("venues") or {}).get("place_id"))
+    }
+
+
+def delete_run(run_key: str) -> bool:
+    """Delete a run and its results. Returns True if a row was removed.
+
+    run_results cascade from the FK. `venues` are deliberately left alone — a
+    venue is a fact about London, not this run's output, and other runs' results
+    still point at it.
+    """
+    client = supabase_client.get_client()
+    if client is None:
+        return False
+    try:
+        res = client.table("runs").delete().eq("run_key", run_key).execute()
+    except Exception as exc:
+        log.warning("could not delete run %s: %s", run_key, str(exc)[:160])
+        return False
+    return bool(res.data)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +326,7 @@ def list_runs(limit: int = 25) -> list[RunSummary]:
                     image_model=row.get("image_model") or "",
                     max_venues=row.get("max_venues"),
                     target_accepted=row.get("target_accepted"),
+                    allow_duplicates=bool(row.get("allow_duplicates", True)),
                     total_cost_usd=float(row.get("total_cost_usd") or 0),
                     discovered=row.get("funnel_discovered") or 0,
                     entered_pipeline=row.get("funnel_entered_pipeline") or 0,
@@ -381,6 +443,7 @@ def get_run(run_key: str | None = None) -> ResultsPayload | None:
         settings = RunSettings(
             max_venues=run["max_venues"],
             target_accepted=run.get("target_accepted") or 0,
+            allow_duplicates=bool(run.get("allow_duplicates", True)),
         )
 
     return ResultsPayload(

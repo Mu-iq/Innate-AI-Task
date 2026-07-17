@@ -69,6 +69,9 @@ class RunRequest(BaseModel):
 
     max_venues: int | None = Field(default=None, ge=1)
     target_accepted: int | None = Field(default=None, ge=1)
+    # Default true = the historical behaviour. False skips venues an earlier run
+    # already accepted.
+    allow_duplicates: bool = True
 
 
 def _clamp_settings(req: RunRequest) -> tuple[int, int]:
@@ -124,13 +127,28 @@ def start_run(background: BackgroundTasks, req: RunRequest | None = None) -> dic
             },
         )
 
+    allow_duplicates = (req or RunRequest()).allow_duplicates
+
     run_id = pipeline_svc.new_run_id()
     pipeline_svc._RUNS[run_id] = RunStatus(run_id=run_id, stage="queued")
     _recent_starts.append(time.time())
-    background.add_task(pipeline_svc.run_pipeline, run_id, max_venues, target_accepted)
+    background.add_task(
+        pipeline_svc.run_pipeline, run_id, max_venues, target_accepted, allow_duplicates
+    )
 
-    log.info("run %s queued (max_venues=%d, target=%d)", run_id, max_venues, target_accepted)
-    return {"run_id": run_id, "max_venues": max_venues, "target_accepted": target_accepted}
+    log.info(
+        "run %s queued (max_venues=%d, target=%d, duplicates=%s)",
+        run_id,
+        max_venues,
+        target_accepted,
+        "allowed" if allow_duplicates else "skipped",
+    )
+    return {
+        "run_id": run_id,
+        "max_venues": max_venues,
+        "target_accepted": target_accepted,
+        "allow_duplicates": allow_duplicates,
+    }
 
 
 @router.get("/status/{run_id}", response_model=RunStatus)

@@ -11,6 +11,7 @@ a Rejection. The funnel in design.md is assembled from exactly these numbers.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.config import (
@@ -29,16 +30,48 @@ from app.utils.logging import get_logger
 log = get_logger("discover")
 
 
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """Compile a blocklist term into a whole-word matcher.
+
+    Plain substring matching is subtly wrong, and it produced two false positives
+    on real London venues: "Pretty Earth" was binned as a chain because it
+    contains "pret", and "Small square cafe" was binned as being inside a mall
+    because "sMALL" contains "mall". Both are the same bug — a brand name is a
+    word, not a character sequence.
+
+    The boundaries are conditional rather than blanket. A trailing `\\b` is only
+    correct when the term ends in a word character: "eat." ends in a dot, and
+    `\\b` after a dot requires a word character next, so it would never match
+    "EAT." at all. Same reasoning for the leading boundary.
+
+    Brands also appear possessive or plural — the list says "mcdonald" but the
+    sign says "McDonald's" or "McDonalds" — so an optional `'s`/`s` is allowed
+    before the closing boundary. It cannot over-match: "Paulo" still fails,
+    because after the optional suffix declines to match "o" there is no boundary
+    between "l" and "o".
+    """
+    t = term.strip()
+    lead = r"\b" if t[:1].isalnum() else ""
+    if t[-1:].isalnum():
+        return re.compile(lead + re.escape(t) + r"(?:'s|s)?\b", re.IGNORECASE)
+    return re.compile(lead + re.escape(t), re.IGNORECASE)
+
+
+# Compiled once at import. Both lists are matched the same way for the same
+# reason, so they share the machinery.
+_CHAIN_PATTERNS = tuple((t.strip(), _term_pattern(t)) for t in CHAIN_BLOCKLIST)
+_INDOOR_PATTERNS = tuple((t.strip(), _term_pattern(t)) for t in INDOOR_CONTEXT_TERMS)
+
+
 def _is_chain(name: str) -> str | None:
     """Return the matched blocklist term, or None.
 
     Chains are excluded because outreach needs an owner who can say yes to a
-    planter; a branch manager cannot. This matches on name substring, which is
-    a category rule -- not a curated list of specific venues we dislike.
+    planter; a branch manager cannot. Matched on whole words, so this stays a
+    category rule rather than a curated list of venues we happen to dislike.
     """
-    lowered = name.lower()
-    for term in CHAIN_BLOCKLIST:
-        if term in lowered:
+    for term, pattern in _CHAIN_PATTERNS:
+        if pattern.search(name):
             return term
     return None
 
@@ -49,9 +82,9 @@ def _is_indoor_context(name: str, address: str) -> str | None:
     A unit in a food court or shopping centre has no street frontage to dress,
     so there is nothing for this product to improve.
     """
-    haystack = f"{name} {address}".lower()
-    for term in INDOOR_CONTEXT_TERMS:
-        if term in haystack:
+    haystack = f"{name} {address}"
+    for term, pattern in _INDOOR_PATTERNS:
+        if pattern.search(haystack):
             return term
     return None
 

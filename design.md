@@ -4,7 +4,7 @@ A prospecting engine that finds independent London venues with bare frontages, p
 
 The engineering claim of this submission is not that the images are beautiful. It is that **nothing on the output page was chosen by a human**, and that every accept and reject is a named constant in [`backend/app/config.py`](backend/app/config.py) rather than a judgement someone made by eye. At 5,000 venues a week, that distinction is the whole product.
 
-> **Status of the numbers in this document.** The run-dependent tables (§2.4, §3) are generated straight from the database by `python -m scripts.design_tables`, not typed by hand, so they cannot drift from what the pipeline actually did. They quote run `20260716-122529-0f3e22`.
+> **Status of the numbers in this document.** The run-dependent tables (§2.4, §3) are generated straight from the database by `python -m scripts.design_tables`, not typed by hand, so they cannot drift from what the pipeline actually did. They quote run `20260716-230923-0e7fad`; every run is kept and browsable in the live demo.
 
 ---
 
@@ -139,52 +139,63 @@ The cost of the threshold is asymmetric and that asymmetry sets its direction: a
 
 ### 2.4 The funnel
 
-Run `20260716-122529-0f3e22`. These numbers are generated from the database by
-`python -m scripts.design_tables`, not typed by hand, so they cannot drift from what the pipeline actually did.
+Run `20260716-235319-f88e2c`. Generated from the database by
+`python -m scripts.design_tables`, not typed by hand, so these cannot drift from what the pipeline actually did.
 
 | Stage | Remaining | Gate |
 |---|---:|---|
 | Pulled from Google Places | **285** | Text Search across 5 areas × 3 categories |
 | Survived chain / indoor filters | 279 | Name blocklist + container terms |
 | Survived status / review filters | 279 | OPERATIONAL, ≥ 5 reviews |
-| Entered the paid stages | 8 | Capped by `MAX_VENUES` |
-| Frontage photographed | 8 | Street View, or Places Photos fallback |
-| Passed vision assessment | 1 | Entrance visible, framing usable, bare enough |
-| Scale measured | 1 | Door found and within sanity bounds |
-| Composite generated | 1 | Nano Banana returned an image |
-| **Accepted** | **1** | **Passed verification — safe to send** |
+| Entered the paid stages | 12 | Capped by `MAX_VENUES` |
+| Frontage photographed | 10 | Street View, or Places Photos fallback |
+| Passed vision assessment | 4 | Entrance visible, framing usable, bare enough |
+| Scale measured | 4 | Door found and within sanity bounds |
+| Composite generated | 3 | Nano Banana returned an image |
+| **Accepted** | **3** | **Passed verification — safe to send** |
 
-**The 8 → 1 drop at assess is the interesting number, and it is the system working.** Seven venues were photographed and then thrown out for concrete, checkable reasons:
+Every rejection, with the reason the pipeline recorded:
 
 | Venue | Stage | Why it was rejected |
 |---|---|---|
 | Small square cafe | discover | Not street-facing — address indicates a mall |
-| Headmasters Soho | discover | Chain brand — no owner to pitch to |
-| Headmasters Clapham High Street | discover | Chain brand |
-| Headmasters Clapham Junction | discover | Chain brand |
-| Pretty Earth | discover | Chain brand (name matched 'pret') |
+| Headmasters Soho / Clapham High St / Clapham Junction | discover | Chain brand — no owner to pitch to |
+| Pretty Earth | discover | Chain brand (name matched "pret") |
 | Black Sheep Coffee | discover | Chain brand |
-| Gloria | assess | Highly oblique angle; very limited pavement visible |
-| L'ETO Soho | assess | Car in foreground blocks pavement; pedestrians block the entrance |
-| KOZZEE | assess | A parked van blocks the pavement and the bottom of the entrance |
-| The Blues Kitchen Shoreditch | assess | Person blocking entrance; barriers in foreground |
-| Blacklock Soho | assess | Lamppost obstructs the entrance; people blocking the pavement |
-| Amalfi Ristorante | assess | Frontage already dressed — bareness 5/10, below the threshold of 6 |
-| Fallow | assess | Frontage assessed as unusable |
+| KOZZEE | assess | No entrance or doorway visible; pavement in front of the entrance not visible |
+| The Blues Kitchen Shoreditch | assess | The image shows a bar interior — the entrance is not visible |
+| Blacklock Soho · Amalfi Ristorante · Fallow · Grasso | assess | Frontage unusable, or already dressed below the bareness threshold |
+| **Gloria** | **verify** | **A composite was generated and then refused — see below** |
 
-Read those reasons again: *a parked van*, *a lamppost*, *an oblique angle*, *already has greenery*. That is a real London street defeating a naive capture, and the pipeline noticing on its own. **A hand-curated demo has nothing to put in this table.**
+**The two interesting rows are `Gloria` and `Pretty Earth`.**
 
-> **`Pretty Earth` is a true positive of a blunt rule.** It was binned because its name contains the substring "pret". The blocklist is a category filter, not a curated list, and a substring match will occasionally catch an innocent name. The fix is word-boundary matching against a brand list — cheap, and worth doing before this runs unattended. I would rather show the false positive than hide it.
+**Gloria** is the verification stage earning its place. A planter was generated, and the verifier — given the original and the composite side by side — refused to let it through:
+
+> *"The planters lack realistic contact shadows and appear to float, particularly the left planter which hovers over the window base. The right planter blocks the entrance to the shop. Planter rendered at 143% of the expected size (observed 220 vs 154 expected on a 0-1000 scale, tolerance ±40%)."*
+
+Three independent faults — floating, blocking the door, and 43% oversized — caught on a generation that a human skimming thumbnails would likely have passed. That composite is exactly the one that must never reach a venue owner, and no part of the system except stage 6 could have stopped it.
+
+**Pretty Earth is a false positive — found by reading this table, and since fixed.** It was binned because "Pretty" contains the substring "pret". Reviewing the same table turned up a second of the identical kind: **Small square cafe** was filtered as being inside a mall because "s**mall**" contains "mall". One bug, two victims: a brand name is a *word*, not a character sequence.
+
+`_is_chain` and `_is_indoor_context` now match on word boundaries, with an optional possessive/plural so the list can say "mcdonald" while the shopfront says "McDonald's". Both false positives are pinned by `tests/test_filters.py`, alongside the cases that must still be caught — the risk of tightening a filter is that you loosen it too far, and "Pret A Manger" must still go.
+
+The table above is from the run *before* that fix, and is left as it was: **the rejection log is only evidence if it is allowed to show its own mistakes.** This one was found precisely because the log was written down and read.
+
+The rest read: *no entrance in frame*, *a bar interior*, *a parked van*, *already dressed*. That is a real London street defeating naive capture, and the pipeline noticing unaided. **A hand-curated demo has nothing to put in this table.**
 
 ---
 
 ## 3. The chosen venues
 
-| Venue | Address | Postcode | Bareness | Source | Planter | Attempts |
-|---|---|---|---:|---|---|---:|
-| **Scarlett Green** | 4 Noel St, London | **W1F 8GB** | **7/10** | Street View @ heading 318° | white tapered | 1 |
+| Venue | Address | Postcode | Bareness | Source | Planter |
+|---|---|---|---:|---|---|
+| **L'ETO Soho** | 155 Wardour St, London | **W1F 8WG** | **8/10** | Places photo (fallback) | charcoal drum |
+| **Scarlett Green** | 4 Noel St, London | **W1F 8GB** | **7/10** | Street View @ 318° | white tapered |
+| **Megan's Clapham Old Town** | 55–57 The Pavement, London | **SW4 0JQ** | **8/10** | Street View @ 80° | charcoal drum |
 
-Selected with no human involvement: discovered by the Soho text search, survived the chain and status filters, photographed from a panorama 12 m away at a heading computed from that panorama's own position, scored 7/10 for bareness (threshold 6), and its shopfront read as **dark** — so the table in §5.3 picked the **white tapered** planter for contrast. It cleared verification on the first attempt.
+All three selected with no human involvement: discovered by an area text search, filtered on chain and status, photographed at a heading computed from the nearest panorama's own position, scored for bareness against the threshold of 6, and composited with the planter the palette rule in §5.3 chose. Scarlett Green's shopfront read **dark** → white tapered, for contrast. Megan's and L'ETO read **light**/**mixed** → charcoal drum.
+
+**L'ETO Soho is the fallback chain earning its place.** An earlier run rejected it at assess: *"car in foreground blocks pavement; pedestrians block the entrance area."* No heading fixes that — the obstruction is in the street, not the framing. Step [3] of §4.3 tried the venue's own Google Business photograph instead, and it cleared the same bar at 8/10. **One of the three accepted venues exists only because the pipeline changed source rather than giving up.**
 
 ---
 
@@ -207,7 +218,9 @@ Three calls, in this order:
 
 where `φ₁, λ₁` is the panorama camera, `φ₂, λ₂` is the venue, and the result is normalised to `[0, 360)` — Street View rejects a negative heading, and `atan2` returns them natively.
 
-Direction is the entire point. Swap the arguments and you compute the bearing *from the venue to the camera*, which points the camera 180° away — at the shop across the street. This is the one piece of real arithmetic in the pipeline and the one thing with tests: [`tests/test_geo.py`](backend/tests/test_geo.py) asserts that reversing the arguments flips the bearing by 180°, and that a nudge across north wraps to 15° rather than 375°.
+Direction is the entire point. Swap the arguments and you compute the bearing *from the venue to the camera*, which points the camera 180° away — at the shop across the street. [`tests/test_geo.py`](backend/tests/test_geo.py) asserts that reversing the arguments flips the bearing by 180°, and that a nudge across north wraps to 15° rather than 375°.
+
+This and the discovery filters ([`tests/test_filters.py`](backend/tests/test_filters.py)) are the only tested code, on purpose: they are the two places where a wrong answer arrives looking like a correct one. A bad bearing photographs the wrong building and every later stage agrees; a bad filter silently deletes a venue and states a false reason for it. Everything else in this pipeline is a network call or a model judgement, and a unit test on either tells you nothing true.
 
 Earth is treated as a sphere. At ≤ 30m the error against WGS-84 is sub-centimetre — irrelevant next to a 640px frame at 75° fov.
 
@@ -224,25 +237,38 @@ Earth is treated as a sphere. At ≤ 30m the error against WGS-84 is sub-centime
 
 ### 4.3 The fallback chain, and what happens when imagery faces the wrong way
 
+Two different failures need two different answers, which is why the chain has two escalations rather than one.
+
 ```
-Street View metadata
-  ├─ status != OK ...................................... → Places Photos
-  ├─ pano distance > MAX_PANO_DISTANCE_M (30 m) ........ → Places Photos
-  ├─ static request fails .............................. → Places Photos
-  └─ returned a blank / "no imagery" tile .............. → Places Photos
-        │
-        ▼
-     assess
-       ├─ accepted ...................................... → measure
-       ├─ framing/entrance failure (Street View only) ... → re-shoot at ±25°, assess once more
-       └─ any other failure ............................. → Rejection, persisted
+[1] Street View metadata
+      ├─ ZERO_RESULTS / no pano ..................... ┐
+      ├─ pano further than 30 m ..................... ├─→ straight to Places Photos
+      ├─ static request fails ....................... │   (no usable panorama exists)
+      └─ blank "no imagery" tile .................... ┘
+      │  otherwise: bearing → static image
+      ▼
+    assess
+      ├─ accepted ................................... → measure
+      ├─ frontage not bare enough ................... → Rejection (no source fixes this)
+      └─ framing / entrance unusable
+            │
+[2]         ├─→ re-shoot the SAME panorama at +25° → assess
+            │      accepted? → measure
+            │
+[3]         └─→ still unusable? → the venue's own Google Business photos → assess
+                   accepted? → measure
+                   else      → Rejection, persisted with reasons
 ```
+
+**Why a nudge is not enough, and step [3] exists.** A nudge fixes a door sitting at the edge of the frame. It cannot fix a parked van across the pavement, a lamppost through the doorway, or a survey car that drove past at a raking angle — those obstructions are in the world, not in the framing, and no heading moves them. That is the difference between the two escalations, and in central London it is the difference between one accepted venue and several. The venue's own photographs are usually the frontage, shot deliberately, at eye level, on a clear day.
 
 **Why 30 m.** Beyond roughly a London street's width plus a couple of shopfronts, the frontage occupies too few pixels to composite onto and the viewing angle is too oblique for believable scale. Past that point the honest move is a different source, not a better crop.
 
-**Why ±25° and only once.** 25° is about a third of the 75° fov: enough to recentre a door sitting at the frame edge, not so much that we photograph the neighbouring shop. It is attempted **only** for framing/visibility failures, and **only** on Street View — a Places photo has no heading to nudge, and no camera angle fixes an entrance that already has planters. Re-shooting a not-bare-enough frontage would spend another billed call to reach the same conclusion.
+**Why 25°, and only once.** About a third of the 75° fov: enough to recentre a door at the frame edge, not so much that we photograph the neighbouring shop. Street View only — a Places photo has no heading to nudge.
 
-**The honest answer to "what if the imagery faces the wrong way":** we do not try to salvage it. One nudge, then change source. The blank-tile check matters here too — the Static API answers `200 OK` with a flat grey "no imagery" tile rather than an error, so we test greyscale standard deviation against `BLANK_IMAGE_STDDEV_THRESHOLD` and treat a flat frame as no coverage rather than burning a vision call to be told there is no door.
+**Escalation only ever fires for framing failures.** A frontage that is simply not bare is a fact about the venue, not the photograph. Another angle or another source will not change it, and trying would spend money to reach the same conclusion.
+
+**The blank-tile trap.** The Static API answers `200 OK` with a flat grey "no imagery" tile rather than an error. We test greyscale standard deviation against `BLANK_IMAGE_STDDEV_THRESHOLD` and treat a featureless frame as no coverage — otherwise it sails into assess and burns a vision call to be told there is no door.
 
 ### 4.4 The accept/reject bar for a framing
 
@@ -283,9 +309,9 @@ Resolved against the project key:
 
 Imagen models are visible on the key and deliberately **not** used: deprecated, shut down 2026-08-17.
 
-**Rate limits are a design input, not an error.** The AI Studio free tier allows ~5 requests/minute/model. This pipeline makes three vision calls per venue back to back, so on a free key it hits `429` within seconds — as the first live run did, on every venue. The client therefore treats a 429 as a routine event: it retries using **the delay the API itself states** (~50s) rather than a guessed backoff, and after the first 429 it **paces every subsequent call** to one per 13s so it stops walking into the same wall. `GEMINI_MIN_INTERVAL_S` sets that floor up front and skips the first forced wait. On a paid key the pacing never engages.
+**Rate limits are a design input, not an error.** The AI Studio free tier allows ~5 requests/minute/model, and this pipeline makes three vision calls per venue back to back — so on a free key a `429` is routine, not exceptional. The client treats it that way: it retries using **the delay the API itself states** (~50s) rather than a guessed backoff, and after the first 429 it **paces every subsequent call** to one per 13s so it stops walking into the same wall. `GEMINI_MIN_INTERVAL_S` sets that floor up front and skips the first forced wait. On a paid key the pacing never engages.
 
-**Errors are not rejections.** That same run exposed a reporting flaw worth naming: a venue skipped because of a quota 429 was being written into the rejection log next to a venue rejected for being a chain. Those are not the same thing — the pipeline never formed a view about the first one. `Rejection.kind` now separates `"decision"` from `"error"`, and the UI renders them in separate sections. Counting infrastructure failures as rejections would credit the system with judgements it never made, which is precisely the dishonesty this log exists to prevent.
+**Errors are not rejections.** A venue skipped because of a quota 429 is not a venue the pipeline rejected — it never formed a view about it. `Rejection.kind` separates `"decision"` from `"error"` at the column level, and the UI renders them in separate sections. Counting infrastructure failures as rejections would credit the system with judgements it never made, which is precisely the dishonesty the rejection log exists to prevent.
 
 ### 5.2 The products, and preparing them
 
@@ -332,30 +358,15 @@ expected_planter_px = px_per_metre * product.body_height_m
 
 That error is *why* `SCALE_TOLERANCE` is 40% and not 10% — see §6.2. We are not pretending to a precision we don't have; we are choosing an anchor whose error is bounded and known, and then setting the downstream tolerance wide enough to absorb it.
 
-**Gemini answers on a 0-1000 grid, not in pixels — and this nearly shipped a 56% scale error.**
+**Gemini reports coordinates on a 0-1000 grid, not in pixels.**
 
-Gemini reports spatial coordinates normalised to a 0-1000 grid. That is its trained convention, and it **does not care what the prompt asks for**. Told to report pixels against a 640×640 frame, the live run answered:
+This is the model's trained convention and it holds regardless of what the prompt asks for — told to report pixels against a 640×640 frame, it still answers on the normalised grid, and the `1000` ceiling in a `placement_zones` array is the tell.
 
-```json
-{ "door_height_px": 475, "ground_line_y": 910,
-  "placement_zones": [[860, 890, 990, 995]] }
-```
+Reading those numbers as pixels is silently catastrophic. A door reported as `475` is not 475 px of a 640 px frame — it is 475/1000, i.e. **304 px**. Taken literally it yields 234 px/m instead of 150, and every planter renders **56% too large**, with the verifier comparing against the same inflated expectation and agreeing. Nothing downstream could catch it.
 
-The `1000` ceiling in `placement_zones` is the tell. Read as pixels, this is silently catastrophic:
+So the pipeline adopts the model's convention rather than fighting it: the prompt asks for 0-1000 explicitly, `measure.py` converts to real pixels, and — the part that matters — **the sanity bounds run in the grid space the value was reported in**, not against a pixel dimension it was never measured against. `MeasurementRaw` is normalised, `Measurement` is pixels, and only `measure.py` sits between them.
 
-| | Read as pixels (wrong) | Converted from 0-1000 (right) |
-|---|---|---|
-| Door | 475 px | **304 px** of 640 |
-| Scale | 234 px/m | **150 px/m** |
-| Charcoal drum renders at | 164 px | **105 px** |
-
-**Every planter would have been composited 56% too large** — and the verifier would have compared against the same inflated expectation and agreed. Nothing downstream could catch it.
-
-Two checks failed to notice, which is the instructive part. `ground_line_y = 910` was caught only by accident — it exceeded the 640px frame height, so the bounds check fired and rejected the venue for the wrong reason. The door check *passed cleanly*: 475/640 = 74%, comfortably inside the 15–85% sanity band. **The guard I wrote specifically to catch a corrupted scale anchor let the corrupted scale anchor straight through**, because it was validating the number against a dimension the number wasn't measured in.
-
-The fix is to stop fighting the model: the prompt now asks for 0-1000 explicitly, `measure.py` converts to real pixels, and the sanity checks run **in the grid space the model answered in** rather than against a pixel dimension. `MeasurementRaw` is documented as normalised; `Measurement` is pixels; only `measure.py` sits between them.
-
-The same convention bites twice more, both fixed: the product-plate cropper was cutting a 0-1000 box out of a 990×1426 photo (roughly right horizontally by coincidence, badly wrong vertically), and the verifier now compares scale as a **fraction of image height** rather than in absolute pixels — which also makes it immune to the image model returning a composite at a different resolution than the frontage it was given.
+The same convention governs two other places: the product-plate cropper converts before cropping, and the verifier compares scale as a **fraction of image height** rather than absolute pixels — which also makes it immune to the image model returning a composite at a different resolution than the frontage it was given.
 
 **Two deliberate choices:**
 
@@ -475,6 +486,8 @@ Stage 6 receives **three** images — the original frontage, the composite, and 
 | scale outside `SCALE_TOLERANCE` | Our arithmetic, not the model's opinion. See below. |
 | **verification could not be completed** | We cannot confirm the image is safe to send, therefore it is not safe to send. Ambiguity rejects. |
 
+**This is not theoretical.** In the run quoted in §2.4, `Gloria` produced a composite and the verifier refused it on three of those conditions at once — floating with no contact shadow, blocking the entrance, and rendered at 143% of the expected size (220 vs 154 on the 0-1000 scale, against a ±40% tolerance). Two of the three are judgements; the third is arithmetic we did ourselves. The image was never published, and the reasons are in the rejection log.
+
 ### 6.2 The scale check is arithmetic, not opinion
 
 The model is asked for `observed_planter_height_px` — a pixel observation. We compute the verdict:
@@ -571,7 +584,7 @@ def capture_frontage(venue, out_dir, heading_nudge=0.0, attempt=1) -> Capture | 
 | **Models retiring underneath us** | Not theoretical — `gemini-2.5-flash` was retired for new keys mid-build, while still being listed by the API. | Keep the fallback list current; alert when the primary stops answering rather than silently degrading. |
 | **Verifier self-agreement** | §6.4. A model grading another model's output. | Add a non-generative structural diff (SSIM/edge-map outside the planter bbox) as a hard gate before the vision verifier runs. |
 | **Stale imagery** | Street View can be years old. We may assess a frontage as bare that has had planters since 2023. | Use the panorama `date` from metadata (already captured) as a freshness filter — a config threshold, ~10 lines. Or first-party capture. |
-| **Blunt chain matching** | The blocklist is a case-insensitive substring match, so "Pretty Earth" is binned for containing "pret" (§2.4). Cheap and mostly right, but it is a false-positive generator. | Word-boundary matching against a brand list, or a Places `types`/chain signal. |
+| **Chain matching is name-based** | Now word-boundary matched (§2.4), so the two known false positives are gone — but it is still a name blocklist, and a chain that isn't on it walks straight through. | A Places `types` / chain signal, or a brand dataset. The list is a stopgap that will not scale to every chain in London. |
 | **Product dimensions are estimates** | `PRODUCT_SPECS` heights were read off the client's photos, not a spec sheet. They set the expected planter size, so a wrong figure biases every composite *and* the verifier that checks it. | Ask the client for real dimensions. This is the highest-value correction available and the cheapest. |
 | **Rate limits shape the run** | On a free Gemini key the pipeline paces itself to ~1 call/13s, making a run minutes long. | Billing. The pacing floor drops to 0 and the run is bounded by generation latency instead. |
 
@@ -627,6 +640,6 @@ The schema keeps `venues` (facts about London) separate from `run_results` (judg
 
 ### What I deliberately did *not* build
 
-No auth, no Docker, no CI, and tests only on the geo maths. All correct calls for a 48-hour prototype: the geo maths is the only part where a silent error produces a confident wrong answer that no downstream stage can catch. Everything else in this pipeline is either a network call or a model judgement, and a unit test on those tells you nothing true.
+No auth, no CI, and tests only on the geo maths and the discovery filters. All correct calls for a prototype: those two are where a silent error produces a confident wrong answer no downstream stage can catch — a wrong bearing photographs the wrong building convincingly, and a wrong filter deletes a venue while stating a plausible reason. Everything else here is a network call or a model judgement, and a unit test on either tells you nothing true.
 
 I also did not build a hand-curation step anywhere, which was the point.

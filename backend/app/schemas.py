@@ -300,8 +300,19 @@ class Thresholds(BaseModel):
 
 
 class RunStatus(BaseModel):
+    """Live progress, polled by the UI while a run is in flight.
+
+    `stage` is the machine name of the step currently executing, so the UI can
+    light up the right one in a pipeline diagram rather than parse prose. The
+    venue fields say who it is working on and how far through it is — "venue 3 of
+    8" is the thing a watcher actually wants to know.
+    """
+
     run_id: str
     stage: str = "queued"
+    venue: str | None = None  # the venue currently being worked on
+    venue_index: int = 0  # 1-based position in the shortlist
+    venue_total: int = 0  # how many entered the paid stages
     processed: int = 0
     accepted: int = 0
     rejected: int = 0
@@ -324,6 +335,9 @@ class RunSettings(BaseModel):
 
     max_venues: int
     target_accepted: int
+    # False = skip venues an earlier run already accepted, so this run spends its
+    # budget on new ones instead of regenerating a visual that already exists.
+    allow_duplicates: bool = True
 
 
 class RunSummary(BaseModel):
@@ -340,6 +354,7 @@ class RunSummary(BaseModel):
     image_model: str = ""
     max_venues: int | None = None
     target_accepted: int | None = None
+    allow_duplicates: bool = True
     total_cost_usd: float = 0.0
     discovered: int = 0
     entered_pipeline: int = 0

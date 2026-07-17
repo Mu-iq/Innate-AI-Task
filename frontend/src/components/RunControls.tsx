@@ -1,16 +1,16 @@
 /**
- * Start a run, with adjustable settings.
+ * Start a run, with adjustable settings and live progress.
  *
- * The two knobs — how many venues to process, and how many acceptances to stop
- * at — are the ones that decide how long a run takes and how much it costs.
- * Defaults and the maximums come from the backend (`/api/health`), so the inputs
- * can never offer a value the server would reject. The server clamps regardless;
- * this just keeps the UI honest about the ceiling.
+ * The settings are the ones that decide how long a run takes and what it costs.
+ * Defaults and maximums come from the backend (`/api/health`), so the inputs can
+ * never offer a value the server would reject — and the server clamps anyway.
  */
 
 import { useState } from 'react';
 import type { BackendState, Health, RunSettingsInput } from '../api/client';
 import type { RunStatus } from '../types';
+import { Info } from './Info';
+import { RunProgress } from './RunProgress';
 
 function StatusDot({ state }: { state: BackendState }) {
   if (state === 'live') {
@@ -34,16 +34,6 @@ function StatusDot({ state }: { state: BackendState }) {
   );
 }
 
-function prettyStage(stage: string): string {
-  if (!stage) return 'Working…';
-  if (stage === 'setup') return 'Preparing…';
-  if (stage === 'discover') return 'Finding venues…';
-  if (stage === 'done') return 'Finished';
-  if (stage === 'failed') return 'Stopped';
-  if (stage.startsWith('processing ')) return `Processing ${stage.slice('processing '.length)}…`;
-  return stage.charAt(0).toUpperCase() + stage.slice(1);
-}
-
 interface Props {
   backend: BackendState;
   health: Health | null;
@@ -56,6 +46,7 @@ interface Props {
 function NumberField({
   label,
   hint,
+  tip,
   value,
   min,
   max,
@@ -64,6 +55,7 @@ function NumberField({
 }: {
   label: string;
   hint: string;
+  tip: string;
   value: number;
   min: number;
   max: number;
@@ -72,7 +64,9 @@ function NumberField({
 }) {
   return (
     <label className="field">
-      <span className="field__label">{label}</span>
+      <span className="field__label">
+        {label} <Info text={tip} />
+      </span>
       <input
         className="field__input"
         type="number"
@@ -96,9 +90,9 @@ export function RunControls({ backend, health, running, status, runError, onRun 
   const bounds = health?.settings;
   const [maxVenues, setMaxVenues] = useState<number | null>(null);
   const [target, setTarget] = useState<number | null>(null);
+  const [allowDuplicates, setAllowDuplicates] = useState(true);
   const [open, setOpen] = useState(false);
 
-  // Resolve effective values: user choice, else the backend default.
   const mv = maxVenues ?? bounds?.max_venues.default ?? 8;
   const tg = target ?? bounds?.target_accepted.default ?? 3;
 
@@ -107,7 +101,9 @@ export function RunControls({ backend, health, running, status, runError, onRun 
       <div className="run">
         <button
           className="btn"
-          onClick={() => onRun({ max_venues: mv, target_accepted: tg })}
+          onClick={() =>
+            onRun({ max_venues: mv, target_accepted: tg, allow_duplicates: allowDuplicates })
+          }
           disabled={running}
         >
           {running ? 'Running…' : 'Run pipeline'}
@@ -125,20 +121,17 @@ export function RunControls({ backend, health, running, status, runError, onRun 
           </button>
         )}
 
-        {running && !status && <span className="run__status">Starting the pipeline…</span>}
-        {status && (
-          <span className="run__status">
-            {prettyStage(status.stage)} · {status.accepted} accepted · {status.rejected} rejected
-          </span>
-        )}
         {runError && <span className="run__err">{runError}</span>}
       </div>
 
-      {open && bounds && (
+      {running && <RunProgress status={status} />}
+
+      {open && bounds && !running && (
         <div className="settings">
           <NumberField
             label="Venues to process"
-            hint="how many enter the paid stages"
+            hint="enter the paid stages"
+            tip="How many of the ~285 discovered venues get photographed, assessed and composited. Discovery is cheap and always runs in full; this caps only the expensive part."
             value={mv}
             min={bounds.max_venues.min}
             max={bounds.max_venues.max}
@@ -147,21 +140,40 @@ export function RunControls({ backend, health, running, status, runError, onRun 
           />
           <NumberField
             label="Stop after accepting"
-            hint="ends the run early once reached"
+            hint="ends the run early"
+            tip="The run stops as soon as this many venues pass verification, so a good run costs less than a bad one."
             value={Math.min(tg, mv)}
             min={bounds.target_accepted.min}
             max={Math.min(bounds.target_accepted.max, mv)}
             disabled={running}
             onChange={setTarget}
           />
+
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={allowDuplicates}
+              disabled={running}
+              onChange={(e) => setAllowDuplicates(e.target.checked)}
+            />
+            <span className="toggle__body">
+              <span className="toggle__label">
+                Allow repeat venues <Info text="When off, the run skips venues an earlier run already accepted, so it spends its budget on new frontages instead of regenerating a visual you already have. Previously-rejected venues are still retried — a parked van may have moved." />
+              </span>
+              <span className="field__hint">
+                {allowDuplicates ? 'may re-process past venues' : 'only venues not yet accepted'}
+              </span>
+            </span>
+          </label>
+
           <p className="settings__note">
-            More venues means a longer run and higher cost — the last step generates a real image
-            per venue. The run stops as soon as it accepts enough.
+            More venues means a longer run and a higher bill — the last step generates a real image
+            per venue.
           </p>
         </div>
       )}
 
-      {!running && !status && !open && (
+      {!running && !open && (
         <p className="run__hint">
           Finds venues, captures each frontage, composites the planters, and verifies the result.
           Takes a few minutes.

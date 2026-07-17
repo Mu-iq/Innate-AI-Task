@@ -156,6 +156,43 @@ def _capture_places_photo(
     return reasons or ["All Places photos were unusable"]
 
 
+def capture_from_places_photos(
+    venue: VenueCandidate,
+    out_dir: Path,
+    attempt: int = 1,
+) -> Capture | Rejection:
+    """Capture from the venue's own Google Business photos, deliberately.
+
+    Distinct from the fallback inside capture_frontage(), which only fires when
+    Street View has no coverage at all. This one is for the other half of the
+    brief's instruction: "if Street View coverage is poor OR FACES THE WRONG WAY,
+    fall back to another source".
+
+    A panorama can exist, be close, and still be useless -- a parked van across
+    the pavement, a lamppost through the doorway, a survey car that drove past at
+    a raking angle. No heading fixes any of those, because the obstruction is in
+    the world, not in the framing. The venue's own photos usually are the
+    frontage, shot deliberately, at eye level, on a clear day.
+
+    They are still only candidates: assess decides, exactly as it does for Street
+    View. We never assume a fallback is good.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = _capture_places_photo(venue, out_dir, attempt)
+
+    if isinstance(result, Capture):
+        log.info("%s: trying the venue's own Places photo instead", venue.name)
+        return result
+
+    return Rejection(
+        venue_id=venue.id,
+        venue_name=venue.name,
+        address=venue.address,
+        stage="capture",
+        reasons=result,
+    )
+
+
 def capture_frontage(
     venue: VenueCandidate,
     out_dir: Path,

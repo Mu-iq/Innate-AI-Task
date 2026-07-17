@@ -11,8 +11,10 @@
  * every venue rejected nothing.
  */
 
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { RunSummary } from '../types';
+import { Info } from './Info';
 
 function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -39,6 +41,7 @@ interface Props {
   runs: RunSummary[];
   selected: string | null;
   onSelect: (runKey: string | null) => void;
+  onDelete: (runKey: string) => void;
   running: boolean;
 }
 
@@ -46,7 +49,10 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <section className="history">
       <header className="history__head">
-        <h2 className="history__title">Runs</h2>
+        <h2 className="history__title">
+          Runs{' '}
+          <Info text="Every run is saved with the venues it chose, the reasons it rejected the rest, and the images it generated. Selecting one shows it exactly as it was." />
+        </h2>
         <p className="history__sub">
           Every pipeline run is kept. Pick one to inspect exactly what it decided, with the images
           it generated at the time.
@@ -57,7 +63,11 @@ function Shell({ children }: { children: ReactNode }) {
   );
 }
 
-export function RunHistory({ runs, selected, onSelect, running }: Props) {
+export function RunHistory({ runs, selected, onSelect, onDelete, running }: Props) {
+  // Two-step delete: a run is minutes of work and real money, so it should not
+  // vanish on a single stray click. Confirming inline beats a modal.
+  const [confirming, setConfirming] = useState<string | null>(null);
+
   if (runs.length === 0) {
     return (
       <Shell>
@@ -78,8 +88,11 @@ export function RunHistory({ runs, selected, onSelect, running }: Props) {
         {runs.map((r) => {
           const isSelected =
             selected === r.run_key || (selected === null && r.run_key === latest);
+          const isConfirming = confirming === r.run_key;
           return (
-            <li key={r.run_key}>
+            // The row and its delete control are siblings, not nested: a button
+            // inside a button is invalid HTML and the inner click never lands.
+            <li key={r.run_key} className="runitem">
               <button
                 className={isSelected ? 'runrow runrow--on' : 'runrow'}
                 onClick={() => onSelect(r.run_key === latest ? null : r.run_key)}
@@ -93,6 +106,11 @@ export function RunHistory({ runs, selected, onSelect, running }: Props) {
                   {r.run_key}
                   {r.run_key === latest && <em className="runrow__latest">latest</em>}
                   {r.dry_run && <em className="runrow__dry">dry run</em>}
+                  {!r.allow_duplicates && (
+                    <em className="runrow__dry" title="This run skipped venues already accepted earlier">
+                      new only
+                    </em>
+                  )}
                 </span>
 
                 <span className="runrow__stats">
@@ -114,6 +132,37 @@ export function RunHistory({ runs, selected, onSelect, running }: Props) {
                   {r.discovered} found · {duration(r.duration_s)} · {ago(r.started_at)}
                 </span>
               </button>
+
+              {isConfirming ? (
+                <span className="runitem__confirm">
+                  <button
+                    className="runitem__yes"
+                    onClick={() => {
+                      onDelete(r.run_key);
+                      setConfirming(null);
+                    }}
+                  >
+                    Delete
+                  </button>
+                  <button className="runitem__no" onClick={() => setConfirming(null)}>
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  className="runitem__del"
+                  onClick={() => setConfirming(r.run_key)}
+                  disabled={running || r.status === 'running'}
+                  title={
+                    r.status === 'running'
+                      ? 'Wait for this run to finish'
+                      : 'Delete this run and its images'
+                  }
+                  aria-label={`Delete run ${r.run_key}`}
+                >
+                  ×
+                </button>
+              )}
             </li>
           );
         })}
